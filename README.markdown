@@ -14,7 +14,7 @@ Build Requirements
 Source tarballs can be downloaded from
 https://github.com/Bumblebee-Project/Bumblebee/downloads
 
-The following packages are dependencies for the build processs:
+The following packages are dependencies for the build process:
 
 - pkg-config
 - glib-2.0 and development headers
@@ -32,7 +32,9 @@ Runtime dependencies
 If you want to use `optirun` for running applications with the discrete nVidia
 card, you will also need:
 
-- [virtualgl](http://virtualgl.org/)
+- At least one back-end for `optirun`:
+  - [virtualgl](http://virtualgl.org/)
+  - [primus](https://github.com/amonakov/primus) (beta)
 - Driver for nvidia graphics card: [nouveau](http://nouveau.freedesktop.org/)
   or the proprietary nvidia driver. Don't install it directly from nvidia.com
   as it will break 3D capabilities on the Intel graphics card and therefore
@@ -42,8 +44,9 @@ If you want to make use of Power Management, you will need:
 
 - [bbswitch](https://github.com/Bumblebee-Project/bbswitch)
 - If you're brave and want to try the `switcheroo` method, install at least the
-  [optimus patch](http://lekensteyn.nl/files/nouveau-switcheroo-optimus.patch).
-  Note that suspend is not yet supported by this method.
+  [optimus patch](http://lekensteyn.nl/files/nouveau-switcheroo-optimus.patch)
+  (merged in Linux 3.3). Note that suspend is not yet supported by this
+  method.
 
 Building
 ---------
@@ -80,7 +83,8 @@ You can build the binaries and set the system wide paths at configure time
     make
 
 After building the binaries and bash completion script, it can be installed
-using `make`:
+together with an udev rule (unless `--without-udev-rules` was passed) using
+`make`:
 
     sudo make install
 
@@ -89,7 +93,7 @@ For packagers you need to add DESTDIR=$pkgdir
     make install DESTDIR=$pkgdir
 
 Example initscripts are available in the `scripts/` directory. Currently,
-Upstart, SystemD and SysV initscripts are available
+Upstart, systemd and Sys V initscripts are available.
 
 Usage
 ------
@@ -98,7 +102,7 @@ The first time you install Bumblebee, the `bumblebee` group has to be created.
 Users who are allowed to use Bumblebee need to be added to the group:
 
     sudo groupadd bumblebee
-    sudo usermod -a -G bumblebee $USER
+    sudo gpasswd -a $USER bumblebee
 
 To run Bumblebee after installing it system-wide, run:
 

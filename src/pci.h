@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Peter Lekensteyn <lekensteyn@gmail.com>
  *
  * This file is part of Bumblebee.
@@ -34,7 +34,7 @@ struct pci_bus_id {
 
 int pci_parse_bus_id(struct pci_bus_id *dest, int bus_id_numeric);
 int pci_get_class(struct pci_bus_id *bus_id);
-struct pci_bus_id *pci_find_gfx_by_vendor(unsigned int vendor_id);
+struct pci_bus_id *pci_find_gfx_by_vendor(unsigned int vendor_id, unsigned int idx);
 size_t pci_get_driver(char *dest, struct pci_bus_id *bus_id, size_t len);
 
 struct pci_config_state {

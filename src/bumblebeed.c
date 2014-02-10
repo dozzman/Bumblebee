@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Joaquín Ignacio Aramendía <samsagax@gmail.com>
  * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
  *
@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <grp.h>
 #include <signal.h>
 #include <stdio.h>
@@ -113,6 +114,7 @@ static int daemonize(void) {
   dup2(devnull, STDIN_FILENO);
   dup2(devnull, STDOUT_FILENO);
   dup2(devnull, STDERR_FILENO);
+  close(devnull);
   return EXIT_SUCCESS;
 }
 
@@ -163,10 +165,13 @@ struct clientsocket {
 /// \param sock Pointer to socket. Assumed to be valid.
 
 static void handle_socket(struct clientsocket * C) {
-  static char buffer[BUFFER_SIZE];
+  static char buffer[BUFFER_SIZE], *conf_key;
+  bool need_secondary;
   //since these are local sockets, we can safely assume we get whole messages at a time
   int r = socketRead(&C->sock, buffer, BUFFER_SIZE);
   if (r > 0) {
+    ensureZeroTerminated(buffer, r, BUFFER_SIZE);
+    conf_key = strchr(buffer, ' ');
     switch (buffer[0]) {
       case 'S'://status
         if (bb_status.errors[0] != 0) {
@@ -198,12 +203,8 @@ static void handle_socket(struct clientsocket * C) {
         break;
       case 'F'://force VirtualGL if possible
       case 'C'://check if VirtualGL is allowed
-        /// \todo Handle power management cases and powering card on/off.
-        //no X? attempt to start it
-        if (!bb_is_running(bb_status.x_pid)) {
-          start_secondary();
-        }
-        if (bb_is_running(bb_status.x_pid)) {
+        need_secondary = conf_key ? strcmp(conf_key + 1, "NoX") : true;
+        if (start_secondary(need_secondary)) {
           r = snprintf(buffer, BUFFER_SIZE, "Yes. X is active.\n");
           if (C->inuse == 0) {
             C->inuse = 1;
@@ -225,7 +226,6 @@ static void handle_socket(struct clientsocket * C) {
         break;
       case 'Q': /* query for configuration details */
         /* required since labels can only be attached on statements */;
-        char *conf_key = strchr(buffer, ' ');
         if (conf_key) {
           conf_key++;
           if (strcmp(conf_key, "VirtualDisplay") == 0) {
@@ -244,7 +244,7 @@ static void handle_socket(struct clientsocket * C) {
         socketWrite(&C->sock, buffer, strlen(buffer) + 1);
         break;
       default:
-        bb_log(LOG_WARNING, "Unhandled message received: %*s\n", r, buffer);
+        bb_log(LOG_WARNING, "Unhandled message received: %s\n", buffer);
         break;
     }
   }
@@ -261,33 +261,60 @@ static void main_loop(void) {
   bb_log(LOG_INFO, "Initialization completed - now handling client requests\n");
   /* Listen for Optirun conections and act accordingly */
   while (bb_status.bb_socket != -1) {
-    usleep(100000); //sleep 100ms to prevent 100% CPU time usage
+    fd_set readfds;
+    int max_fd = 0;
 
-    /* Accept a connection. */
-    optirun_socket_fd = socketAccept(&bb_status.bb_socket, SOCK_NOBLOCK);
-    if (optirun_socket_fd >= 0) {
-      bb_log(LOG_DEBUG, "Accepted new connection\n", optirun_socket_fd, bb_status.appcount);
+    FD_ZERO(&readfds);
+#define FD_SET_AND_MAX(fd)                   \
+    do if ((fd) >= 0 && (fd) < FD_SETSIZE) { \
+      FD_SET((fd), &readfds);                \
+      if (max_fd < (fd))                     \
+        max_fd = (fd);                       \
+    } while (0)
+    FD_SET_AND_MAX(bb_status.bb_socket);
+    FD_SET_AND_MAX(bb_status.x_pipe[0]);
+    for (client = last; client; client = client->prev)
+      FD_SET_AND_MAX(client->sock);
+#undef FD_SET_AND_MAX
 
-      /* add to list of sockets */
-      client = malloc(sizeof (struct clientsocket));
-      client->sock = optirun_socket_fd;
-      client->inuse = 0;
-      client->prev = last;
-      client->next = 0;
-      if (last) {
-        last->next = client;
+    if (select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0) {
+      if (errno == EINTR)
+        continue;
+      bb_log(LOG_ERR, "select() failed: %s\n", strerror(errno));
+      break;
+    }
+
+#define FD_EVENT(fd) ((fd) >= 0 && FD_ISSET((fd), &readfds))
+    if (FD_EVENT(bb_status.bb_socket)) {
+      /* Accept a connection. */
+      optirun_socket_fd = socketAccept(&bb_status.bb_socket, SOCK_NOBLOCK);
+      if (optirun_socket_fd >= 0) {
+        bb_log(LOG_DEBUG, "Accepted new connection\n", optirun_socket_fd, bb_status.appcount);
+
+        /* add to list of sockets */
+        client = malloc(sizeof (struct clientsocket));
+        client->sock = optirun_socket_fd;
+        client->inuse = 0;
+        client->prev = last;
+        client->next = 0;
+        if (last) {
+          last->next = client;
+        }
+        last = client;
       }
-      last = client;
     }
 
     //check the X output pipe, if open
-    check_xorg_pipe();
+    if (FD_EVENT(bb_status.x_pipe[0]))
+      check_xorg_pipe();
 
     /* loop through all connections, removing dead ones, receiving/sending data to the rest */
     struct clientsocket *next_iter;
     for (client = last; client; client = next_iter) {
       /* set the next client here because client may be free()'d */
       next_iter = client->prev;
+      if (FD_EVENT(client->sock))
+        handle_socket(client);
       if (client->sock < 0) {
         //remove from list
         if (client->inuse > 0) {
@@ -306,11 +333,9 @@ static void main_loop(void) {
           client->prev->next = client->next;
         }
         free(client);
-      } else {
-        //active connection, handle it.
-        handle_socket(client);
       }
     }
+#undef FD_EVENT
   }//socket server loop
 
   /* loop through all connections, closing all of them */
@@ -350,6 +375,7 @@ const struct option *bbconfig_get_lopts(void) {
   static struct option longOpts[] = {
     {"daemon", 0, 0, 'D'},
     {"xconf", 1, 0, 'x'},
+    {"xconfdir", 1, 0, OPT_X_CONF_DIR_PATH},
     {"group", 1, 0, 'g'},
     {"module-path", 1, 0, 'm'},
     {"driver-module", 1, 0, 'k'},
@@ -380,6 +406,9 @@ int bbconfig_parse_options(int opt, char *value) {
       break;
     case 'x'://xorg.conf path
       set_string_value(&bb_config.x_conf_file, value);
+      break;
+    case OPT_X_CONF_DIR_PATH://xorg.conf.d path
+      set_string_value(&bb_config.x_conf_dir, value);
       break;
     case 'g'://group name to use
       set_string_value(&bb_config.gid_name, value);
@@ -415,7 +444,7 @@ int main(int argc, char* argv[]) {
 #endif
 
   /* the logs needs to be ready before the signal handlers */
-  init_early_config(argc, argv, BB_RUN_SERVER);
+  init_early_config(argv, BB_RUN_SERVER);
   bbconfig_parse_opts(argc, argv, PARSE_STAGE_LOG);
   bb_init_log();
 
@@ -429,19 +458,34 @@ int main(int argc, char* argv[]) {
   signal(SIGPIPE, handle_signal);
 
   /* first load the config to make the logging verbosity level available */
-  init_config(argc, argv);
+  init_config();
   bbconfig_parse_opts(argc, argv, PARSE_STAGE_PRECONF);
 
-  pci_bus_id_discrete = pci_find_gfx_by_vendor(PCI_VENDOR_ID_NVIDIA);
-  if (!pci_bus_id_discrete) {
-    bb_log(LOG_ERR, "No nVidia graphics card found, quitting.\n");
-    return (EXIT_FAILURE);
-  }
-  struct pci_bus_id *pci_id_igd = pci_find_gfx_by_vendor(PCI_VENDOR_ID_INTEL);
+  /* First look for an intel card */
+  struct pci_bus_id *pci_id_igd = pci_find_gfx_by_vendor(PCI_VENDOR_ID_INTEL, 0);
   if (!pci_id_igd) {
-    bb_log(LOG_ERR, "No Optimus system detected, quitting.\n");
+    /* This is no Optimus configuration. But maybe it's a
+       dual-nvidia configuration. Let us test that.
+    */
+    pci_id_igd = pci_find_gfx_by_vendor(PCI_VENDOR_ID_NVIDIA, 1);
+    bb_log(LOG_INFO, "No Intel video card found, testing for dual-nvidia system.\n");
+
+    if (!pci_id_igd) {
+      /* Ok, this is not a double gpu setup supported (there is at most
+         one nvidia and no intel cards */
+      bb_log(LOG_ERR, "No integrated video card found, quitting.\n");
+      return (EXIT_FAILURE);
+    }
+  }
+  pci_bus_id_discrete = pci_find_gfx_by_vendor(PCI_VENDOR_ID_NVIDIA, 0);
+  if (!pci_bus_id_discrete) {
+    bb_log(LOG_ERR, "No discrete video card found, quitting\n");
     return (EXIT_FAILURE);
   }
+
+  bb_log(LOG_DEBUG, "Found card: %02x:%02x.%x (discrete)\n", pci_bus_id_discrete->bus, pci_bus_id_discrete->slot, pci_bus_id_discrete->func);
+  bb_log(LOG_DEBUG, "Found card: %02x:%02x.%x (integrated)\n", pci_id_igd->bus, pci_id_igd->slot, pci_id_igd->func);
+
   free(pci_id_igd);
 
   GKeyFile *bbcfg = bbconfig_parse_conf();
@@ -515,7 +559,7 @@ int main(int argc, char* argv[]) {
   bb_status.runmode = BB_RUN_EXIT; //make sure all methods understand we are shutting down
   if (bb_config.card_shutdown_state) {
     //if shutdown state = 1, turn on card
-    start_secondary();
+    start_secondary(false);
   } else {
     //if shutdown state = 0, turn off card
     stop_secondary();

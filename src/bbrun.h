@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 Bumblebee Project
+ * Copyright (c) 2011-2013, The Bumblebee Project
  * Author: Jaron Viëtor AKA "Thulinma" <jaron@vietors.com>
  *
  * This file is part of Bumblebee.
@@ -50,3 +50,6 @@ void bb_run_exec(char ** argv);
 
 /// Cancels waiting for processes to finish - use when doing a fast shutdown.
 void bb_run_stopwaiting(void);
+
+/* Finds a program in PATH, similar to which(1). */
+char * which_program(const char * program_name);
